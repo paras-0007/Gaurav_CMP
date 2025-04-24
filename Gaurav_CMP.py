@@ -4,6 +4,7 @@ import pandas as pd
 from bs4 import BeautifulSoup
 from datetime import datetime
 import numpy as np
+import re
 
 warnings.filterwarnings("ignore")
 
@@ -77,38 +78,44 @@ def header_extractor(html_content):
         print(f"Exception in cleanup_emails for case {case_no}: {e}")
         return f"Exception in cleanup_emails for case {case_no}: {e}"
     
+
 def cleanup_emails(html_content):
     seen_hashes = set()
     cleaned_emails = []
     
     try:
         soup = BeautifulSoup(html_content, 'html.parser')
-        email_blocks = []
-        
-        # Split HTML content by "From:" markers to identify email blocks
         raw_text = soup.get_text()
-        email_texts = re.split(r'(From:\s+.*)', raw_text)  # Split at "From:"
-        email_texts = [t.strip() for t in email_texts if t.strip()]
         
-        # Group blocks starting with "From:"
+        # Normalize content: Remove image references, timestamps, and URLs
+        normalized_text = re.sub(r'\[cid:.*?\]', '', raw_text)              # Remove [cid:...]
+        normalized_text = re.sub(r'\d{2}/\d{2}/\d{4}, \d{2}:\d{2}:\d{2}', '', normalized_text)  # Remove dates
+        normalized_text = re.sub(r'http\S+', '', normalized_text)           # Remove URLs
+        
+        # Split emails using "From:" as delimiter
+        email_blocks = re.split(r'(From:\s+.*)', normalized_text)
+        email_blocks = [block.strip() for block in email_blocks if block.strip()]
+        
+        # Group emails and deduplicate
         current_block = []
-        for text in email_texts:
-            if text.startswith("From:"):
-                if current_block:
-                    email_blocks.append("\n".join(current_block))
-                    current_block = []
-                current_block.append(text)
-            else:
-                current_block.append(text)
-        if current_block:
-            email_blocks.append("\n".join(current_block))
-        
-        # Deduplicate blocks
         for block in email_blocks:
-            block_hash = hash(block.strip())
-            if block_hash not in seen_hashes:
-                seen_hashes.add(block_hash)
-                cleaned_emails.append(block)
+            if re.match(r'From:\s+.*', block):
+                if current_block:
+                    full_email = "\n".join(current_block)
+                    email_hash = hash(full_email)
+                    if email_hash not in seen_hashes:
+                        seen_hashes.add(email_hash)
+                        cleaned_emails.append(full_email)
+                    current_block = []
+                current_block.append(block)
+            else:
+                current_block.append(block)
+        if current_block:
+            full_email = "\n".join(current_block)
+            email_hash = hash(full_email)
+            if email_hash not in seen_hashes:
+                seen_hashes.add(email_hash)
+                cleaned_emails.append(full_email)
         
         return cleaned_emails
     
@@ -473,28 +480,26 @@ def application(environ, start_response):
 
     return [output]
 
-
 def index_local(id):
     try:
         case_thread = gen_string(id)
-        soup = BeautifulSoup(case_thread, 'html.parser')
-        
-        # Extract and deduplicate email blocks
         emails = cleanup_emails(case_thread)
         
-        # Build structured output
+        # Format emails with headers and indentation
         structured_output = []
         for email in emails:
             lines = email.split('\n')
-            structured_email = []
+            formatted_email = []
             for line in lines:
                 if line.startswith("From:") or line.startswith("Subject:"):
-                    structured_email.append(f"**{line}**")
+                    formatted_email.append(f"\n**{line}**\n")
+                elif line.startswith("Sent:") or line.startswith("To:"):
+                    formatted_email.append(f"  {line}")
                 else:
-                    structured_email.append(f"  {line}")
-            structured_output.append("\n".join(structured_email))
+                    formatted_email.append(f"    {line}")
+            structured_output.append("\n".join(formatted_email))
         
-        return "\n\n---\n\n".join(structured_output)
+        return "\n\n" + "─"*80 + "\n\n".join(structured_output) + "\n\n" + "─"*80
     
     except Exception as e:
         return f"Error: {str(e)}"
