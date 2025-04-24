@@ -78,40 +78,43 @@ def header_extractor(html_content):
         return f"Exception in cleanup_emails for case {case_no}: {e}"
     
 def cleanup_emails(html_content):
-    seen_hashes = set()  # Track hashes of processed content
+    seen_hashes = set()
+    cleaned_emails = []
+    
     try:
+        soup = BeautifulSoup(html_content, 'html.parser')
+        email_blocks = []
         
-        start_marker = "Emails"
-        end_marker = "Open Activities"
-            
-        start_pos = html_content.find(start_marker)
-        end_pos = html_content.find(end_marker)
-
-        if start_pos == -1 or end_pos == -1:
-            
-            return "Start or end marker not found in the HTML content"
-
-        new_content = html_content[start_pos:end_pos]
-        soup = BeautifulSoup(new_content, 'html.parser')
-
-        #target_elements = soup.find_all('td', attrs={'width': '65.5%'})
-        target_elements = soup.find_all('td', attrs={'width': '62.5%', 'colspan':'2'})
+        # Split HTML content by "From:" markers to identify email blocks
+        raw_text = soup.get_text()
+        email_texts = re.split(r'(From:\s+.*)', raw_text)  # Split at "From:"
+        email_texts = [t.strip() for t in email_texts if t.strip()]
         
-        cleaned_emails = []
-        for elem in target_elements:
-            soup2 = BeautifulSoup(str(elem), 'html.parser')
-            target_div = soup2.find('div')
-            content = str(target_div)
-            content_hash = hash(content.strip())  # Generate hash
-            
-            if content_hash not in seen_hashes:
-                seen_hashes.add(content_hash)
-                cleaned_emails.append(content)
+        # Group blocks starting with "From:"
+        current_block = []
+        for text in email_texts:
+            if text.startswith("From:"):
+                if current_block:
+                    email_blocks.append("\n".join(current_block))
+                    current_block = []
+                current_block.append(text)
+            else:
+                current_block.append(text)
+        if current_block:
+            email_blocks.append("\n".join(current_block))
+        
+        # Deduplicate blocks
+        for block in email_blocks:
+            block_hash = hash(block.strip())
+            if block_hash not in seen_hashes:
+                seen_hashes.add(block_hash)
+                cleaned_emails.append(block)
+        
         return cleaned_emails
-
+    
     except Exception as e:
-        print(f"Exception in cleanup_emails for case {case_no}: {e}")
-        return f"Exception in cleanup_emails for case {case_no}: {e}"
+        print(f"Error: {e}")
+        return []
 
 def extract_comments(html_content):
 
@@ -476,25 +479,22 @@ def index_local(id):
         case_thread = gen_string(id)
         soup = BeautifulSoup(case_thread, 'html.parser')
         
-        # Remove duplicate sections (if any)
-        sections = set()
-        cleaned_content = []
-        for element in soup.stripped_strings:
-            if element not in sections:
-                cleaned_content.append(element)
-                sections.add(element)
+        # Extract and deduplicate email blocks
+        emails = cleanup_emails(case_thread)
         
-        # Format text with line breaks and spacing
-        structured_text = []
-        for line in cleaned_content:
-            if line.startswith(('Case Information:', 'CCR Information', 'COMMUNICATIONS:')):
-                structured_text.append(f"\n\n### {line} ###\n")
-            elif ':' in line:
-                structured_text.append(f"  - {line}")
-            else:
-                structured_text.append(f"    {line}")
+        # Build structured output
+        structured_output = []
+        for email in emails:
+            lines = email.split('\n')
+            structured_email = []
+            for line in lines:
+                if line.startswith("From:") or line.startswith("Subject:"):
+                    structured_email.append(f"**{line}**")
+                else:
+                    structured_email.append(f"  {line}")
+            structured_output.append("\n".join(structured_email))
         
-        return '\n'.join(structured_text)
+        return "\n\n---\n\n".join(structured_output)
     
     except Exception as e:
         return f"Error: {str(e)}"
