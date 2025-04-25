@@ -1,140 +1,166 @@
 import requests
+import warnings
 import pandas as pd
 from bs4 import BeautifulSoup
-from datetime import datetime
-import numpy as np
-import warnings
+import re
+
 warnings.filterwarnings("ignore")
 
-# Constants
-CSV_COLUMNS = ['Type', 'Status', 'From', 'Subject', 'Date', 'Days Since Last', 'Content']
-
 def generate_url(case_no):
-    return f"http://cdsinfo.cadence.com/cgi-bin/cdsinfoprod?input={case_no}&type=_&codmode=p"
+    """Generates the URL for a given case number."""
+    base_url1 = "http://cdsinfo.cadence.com/cgi-bin/cdsinfoprod?input="
+    base_url2 = "&type=_&codmode=p"
+    return base_url1 + str(case_no) + base_url2
 
-def fetch_html(url):
+def fetch_url_content(url):
+    """Fetches the HTML content of a URL."""
     try:
-        return requests.get(url).text
-    except Exception as e:
-        print(f"Connection Error: {e}")
+        response = requests.get(url)
+        response.raise_for_status()  # Raise exception for bad response status
+        return response.text
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching URL {url}: {e}")
         return None
 
-def parse_date(date_str):
-    formats = [
-        '%m/%d/%Y, %H:%M:%S',  # 07/30/2024, 10:17:05
-        '%d %B %Y at %H:%M',    # 31 July 2024 at 14:30
-        '%Y-%m-%d %H:%M:%S',    # 2024-07-30 10:17:05
-        '%d/%m/%Y, %H:%M:%S'    # 30/07/2024, 10:17:05
-    ]
-    for fmt in formats:
-        try:
-            return datetime.strptime(date_str, fmt)
-        except ValueError:
-            continue
-    return None
+def extract_case_details(html_content):
+    """Extracts case details (number, title, summary, basics, contact, information)."""
 
-def extract_comms_data(html):
-    soup = BeautifulSoup(html, 'html.parser')
-    data = []
+    soup = BeautifulSoup(html_content, 'html.parser')
+    details = {}
 
-    # Extract Email Communications
-    emails_section = soup.find('h3', string='COMMUNICATIONS:')
-    if emails_section:
-        table = emails_section.find_next('table')
-        for row in table.find_all('tr')[1:]:  # Skip header
-            cols = row.find_all('td')
-            if len(cols) >= 5:
-                comm_type = cols[0].get_text(strip=True)
-                sender = cols[1].get_text(strip=True)
-                subject = cols[2].get_text(strip=True)
-                date = cols[3].get_text(strip=True)
-                days = cols[4].get_text(strip=True)
-                content = row.find_next('tr').td.get_text(strip=True) if row.find_next('tr') else ""
-                
-                data.append({
-                    'Type': comm_type,
-                    'Status': 'Received',
-                    'From': sender,
-                    'Subject': subject,
-                    'Date': date,
-                    'Days Since Last': days,
-                    'Content': content
-                })
+    # Case Number and Title
+    case_number_title = soup.find('table', class_='collection-as-table1').find_all('font')
+    details['Case Number'] = case_number_title[0].next_sibling.strip() if case_number_title else None
+    details['Case Title'] = case_number_title[1].text.strip() if len(case_number_title) > 1 else None
 
-    # Extract Case Information
-    case_info = {}
-    info_section = soup.find('h3', string='Case Information:')
-    if info_section:
-        for p in info_section.find_all_next('p'):
-            if ':' in p.text:
-                key, val = p.text.split(':', 1)
-                case_info[key.strip()] = val.strip()
-    
-    # Extract Comments
-    comments_section = soup.find('h2', string='Case Comments')
-    if comments_section:
-        for comment in comments_section.find_next('table').find_all('tr')[1:]:
-            cols = comment.find_all('td')
-            if len(cols) >= 3:
-                data.append({
-                    'Type': 'COMMENT',
-                    'Status': 'Posted',
-                    'From': cols[1].get_text(strip=True),
-                    'Subject': 'Case Comment',
-                    'Date': cols[2].get_text(strip=True),
-                    'Days Since Last': 'N/A',
-                    'Content': cols[0].get_text(strip=True)
-                })
+    # Summary
+    summary_section = soup.find('tr', text=re.compile(r'Summary'))
+    if summary_section:
+        case_summary = summary_section.find_next('td', class_='collection-as-table')
+        details['Case Summary'] = case_summary.text.strip() if case_summary else None
 
-    # Extract CCR Information
-    ccr_section = soup.find('h2', string='CCR Information')
-    if ccr_section:
-        ccr_content = ccr_section.find_next('div', class_='description')
-        data.append({
-            'Type': 'CCR',
-            'Status': 'Documented',
-            'From': 'Cadence Support',
-            'Subject': 'Change Control Request',
-            'Date': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'Days Since Last': 'N/A',
-            'Content': ccr_content.get_text(strip=True) if ccr_content else ""
-        })
+    # Case Basics
+    case_basics_section = soup.find('tr', text=re.compile(r'Case Basics'))
+    if case_basics_section:
+        labels = case_basics_section.find_parent('table').find_all('td', align='right')
+        values = [label.find_next_sibling('td') for label in labels]
+        for label, value in zip(labels, values):
+            label_text = label.text.strip().replace(':', '')
+            details[label_text] = value.text.strip() if value else None
 
-    return pd.DataFrame(data), case_info
+    # Description
+    description_section = soup.find('tr', text=re.compile(r'Description'))
+    if description_section:
+        description_td = description_section.find_next('td', colspan="3")
+        details['Case Description'] = description_td.text.strip() if description_td else None
 
-def process_case(case_no):
-    url = generate_url(case_no)
-    html = fetch_html(url)
-    if not html:
-        return None
+    # Contact Information
+    contact_info_section = soup.find('tr', text=re.compile(r'Contact Information'))
+    if contact_info_section:
+        labels = contact_info_section.find_parent('table').find_all('td', align='right')
+        values = [label.find_next_sibling('td') for label in labels]
+        for label, value in zip(labels, values):
+            label_text = label.text.strip().replace(':', '')
+            details[label_text] = value.text.strip() if value else None
 
-    # Extract and structure data
-    comms_df, case_info = extract_comms_data(html)
-    
-    # Add case metadata
-    comms_df['Case Number'] = case_no
-    comms_df['Case Title'] = case_info.get('Case Title', '')
-    comms_df['Product'] = case_info.get('Product', '')
-    
-    # Clean date formatting
-    comms_df['Parsed Date'] = comms_df['Date'].apply(parse_date)
-    comms_df.sort_values('Parsed Date', inplace=True)
-    
-    # Reorder columns
-    final_cols = ['Case Number', 'Case Title', 'Product'] + CSV_COLUMNS
-    return comms_df[final_cols].drop(columns=['Parsed Date'])
+    # Case Information
+    case_information_section = soup.find('tr', text=re.compile(r'Case Information'))
+    if case_information_section:
+        labels = case_information_section.find_parent('table').find_all('td', align='right')
+        values = [label.find_next_sibling('td') for label in labels]
+        for label, value in zip(labels, values):
+            label_text = label.text.strip().replace(':', '')
+            details[label_text] = value.text.strip() if value else None
 
-# Main Execution
-if __name__ == "__main__":
-    case_number = "46816635"
-    result_df = process_case(case_number)
-    
-    if result_df is not None:
-        # Save to CSV with enhanced formatting
-        result_df.to_csv(f'case_{case_number}_structured.csv', 
-                        index=False,
-                        encoding='utf-8-sig',
-                        date_format='%Y-%m-%d %H:%M:%S')
-        print(f"Successfully generated structured report for case {case_number}")
+    return details
+
+def extract_email_headers(html_content):
+    """Extracts the headers of the email section."""
+
+    start_marker = "Emails"
+    end_marker = "Open Activities"
+    start_pos = html_content.find(start_marker)
+    end_pos = html_content.find(end_marker)
+
+    if start_pos == -1 or end_pos == -1:
+        return ["Emails Section Not Found"]  # Return a clear message
+
+    email_content = html_content[start_pos:end_pos]
+    soup = BeautifulSoup(email_content, 'html.parser')
+    header_row = soup.find('tr', style=lambda x: x and all(f'width: {w}' in x for w in ["10%", "10%", "40%", "30%", "10%"]))
+
+    if header_row:
+        return [th.text.strip() for th in header_row.find_all('td')]
     else:
-        print("Failed to generate report")
+        return ["Email Headers Not Found"]  # Return a clear message
+
+def extract_emails(html_content):
+    """Extracts emails from the HTML content, avoiding duplicates."""
+
+    start_marker = "Emails"
+    end_marker = "Open Activities"
+    start_pos = html_content.find(start_marker)
+    end_pos = html_content.find(end_marker)
+
+    if start_pos == -1 or end_pos == -1:
+        return []
+
+    email_content = html_content[start_pos:end_pos]
+    soup = BeautifulSoup(email_content, 'html.parser')
+
+    email_data = []
+    seen_contents = set()
+
+    email_tables = soup.find_all('table', style=lambda x: x and 'width: 100%' in x and 'border: 0px' in x)
+
+    for table in email_tables:
+        row_data = {}
+        header_row = table.find_previous('tr', style=lambda x: x and all(f'width: {w}' in x for w in ["10%", "10%", "40%", "30%", "10%"]))
+        if header_row:
+            headers = [th.text.strip() for th in header_row.find_all('td')]
+        else:
+            headers = ["Name", "Status", "Subject", "From Address", "Message Date"]
+
+        data_rows = table.find_all('tr')
+        if len(data_rows) > 1:  # Ensure there are data rows
+            for row in data_rows[1:]:
+                cells = row.find_all('td')
+                if len(cells) == len(headers):
+                    for i, cell in enumerate(cells):
+                        row_data[headers[i]] = cell.text.strip()
+                    content_hash = hash(str(row_data))
+                    if content_hash not in seen_contents:
+                        email_data.append(row_data)
+                        seen_contents.add(content_hash)
+    return email_data
+
+def main(case_number):
+    """Main function to orchestrate the scraping and data processing."""
+
+    url = generate_url(case_number)
+    html_content = fetch_url_content(url)
+
+    if not html_content:
+        return None  # Or raise an exception
+
+    case_details = extract_case_details(html_content)
+    email_headers = extract_email_headers(html_content)
+    emails = extract_emails(html_content)
+
+    # Structure the data for CSV export
+    data_for_csv = [case_details]  # Start with case details
+    for email in emails:
+        data_for_csv.append(email)
+
+    df = pd.DataFrame(data_for_csv)
+    return df
+
+if __name__ == "__main__":
+    case_number = "46816635"  # Replace with the desired case number
+    df = main(case_number)
+
+    if df is not None:
+        df.to_csv(f"case_{case_number}_report.csv", index=False)
+        print(f"CSV report generated: case_{case_number}_report.csv")
+    else:
+        print("Failed to generate report.")
