@@ -4,30 +4,49 @@ import pandas as pd
 from bs4 import BeautifulSoup
 from datetime import datetime
 import numpy as np
-import hashlib
+import re
 
 warnings.filterwarnings("ignore")
 
-# -------------------- Utility Functions --------------------
 def generate_url(case_no):
     return f"http://cdsinfo.cadence.com/cgi-bin/cdsinfoprod?input={case_no}&type=_&codmode=p"
 
-def fetch_content(url):
+def fetch_url_content(url):
     try:
         response = requests.get(url)
         response.raise_for_status()
         return response.text
     except requests.exceptions.RequestException as e:
-        print(f"Error fetching URL: {e}")
+        print(f"Error fetching URL {url}: {e}")
         return None
 
+def case_title(html_content):
+    start = "Would you like to associate an Article to this Case"
+    end = "Environment"
+    position = html_content.find(start)
+    if position != -1:
+        new_content = html_content[position + len(start):]
+        end_pos = new_content.find(end)
+        if end_pos != -1:
+            new_content2 = new_content[:end_pos]
+            return BeautifulSoup(new_content2, 'html.parser').get_text(strip=True)[19:]
+    return ""
+
+def extract_description(html_content):
+    start = "Description"
+    end = "Severity"
+    position = html_content.find(start)
+    if position != -1:
+        new_content = html_content[position:]
+        position = new_content.find(end)
+        if position != -1:
+            new_content2 = new_content[:position]
+            return BeautifulSoup(new_content2, 'html.parser').get_text()[12:]
+    return ""
+
 def parse_date(date_str):
-    formats = [
-        '%m/%d/%Y, %H:%M:%S',
-        '%d/%m/%Y, %H:%M:%S',
-        '%Y-%m-%d %H:%M:%S',
-        '%A, %d %B %Y at %I:%M %p'
-    ]
+    formats = ['%m/%d/%Y, %H:%M:%S','%d/%m/%Y, %H:%M:%S', '%d/%m/%Y %H:%M', '%Y/%d/%m %H:%M', '%Y-%m-%d %H:%M:%S',
+               '%A, %d %B %Y at %I:%M %p', '%A, %d %B %Y at %H:%M', '%d %B %Y %H:%M:%S']
     for fmt in formats:
         try:
             return datetime.strptime(date_str, fmt)
@@ -35,136 +54,46 @@ def parse_date(date_str):
             continue
     return None
 
-# -------------------- Metadata Extraction --------------------
-def extract_case_metadata(html_content):
-    soup = BeautifulSoup(html_content, 'html.parser')
-    metadata = {
-        'case_number': None,
-        'title': None,
-        'description': None,
-        'ccr_number': None,
-        'ccr_description': None
-    }
+def index_local_to_csv(id, txt_path, csv_path):
+    try:
+        # Read structured text data
+        with open(txt_path, 'r', encoding='utf-8') as f:
+            data = f.read()
 
-    # Extract case number
-    case_link = soup.find('a', href=lambda x: x and 'cdsinfoprod' in x)
-    if case_link:
-        metadata['case_number'] = case_link.text.split()[-1]
+        # Extract case info (already known)
+        case_info_match = re.search(r"Case Number: (\d+)\nCase Title:\n(.*?)\nCase Decription:\n(.*?)\n", data, re.DOTALL)
+        case_number = case_info_match.group(1).strip()
+        case_title = case_info_match.group(2).strip()
+        case_description = case_info_match.group(3).strip()
 
-    # Extract title
-    title_tag = soup.find('h1')
-    if title_tag:
-        metadata['title'] = title_tag.get_text(strip=True)
+        # Extract emails
+        email_blocks = re.findall(r"Email-\d+.*?Date: (.*?)\s*(From:.*?)\s*(.*?)Thanks,.*?(?=Email-\d+|\Z)", data, re.DOTALL)
+        emails_list = []
+        for i, (date, header, body) in enumerate(email_blocks):
+            from_match = re.search(r"From:\s*(\S+@\S+)", header)
+            subject_match = re.search(r"Subject:\s*(.*?)\n", header)
+            from_address = from_match.group(1) if from_match else "Unknown"
+            subject = subject_match.group(1).strip() if subject_match else "No Subject"
+            emails_list.append({
+                'Email Name': f'Email-{i+1}',
+                'Status': 'Initial Mail' if i == 0 else f'Response {i}',
+                'Subject': subject,
+                'From Address': from_address,
+                'Message Date': date.strip(),
+                'Body': re.sub(r'\s+', ' ', body.strip())
+            })
 
-    # Extract description
-    desc_tag = soup.find('h2', string='Description')
-    if desc_tag:
-        metadata['description'] = desc_tag.find_next('div').get_text(strip=True)
+        # Create DataFrame and save
+        df = pd.DataFrame(emails_list)
+        df.to_csv(csv_path, index=False)
+        print(f"✅ CSV saved at: {csv_path}")
 
-    # Extract CCR information
-    ccr_tag = soup.find('td', string='Bug/Enh CCR')
-    if ccr_tag:
-        metadata['ccr_number'] = ccr_tag.find_next('td').get_text(strip=True)
-        if metadata['ccr_number']:
-            ccr_url = generate_url(metadata['ccr_number'])
-            ccr_content = fetch_content(ccr_url)
-            if ccr_content:
-                ccr_soup = BeautifulSoup(ccr_content, 'html.parser')
-                desc_tag = ccr_soup.find('h2', string='DESCRIPTION')
-                if desc_tag:
-                    metadata['ccr_description'] = desc_tag.find_next('div').get_text(strip=True)
+    except Exception as e:
+        print(f"❌ Error during processing: {e}")
 
-    return metadata
-
-# -------------------- Communications Processing --------------------
-def process_communications(html_content):
-    soup = BeautifulSoup(html_content, 'html.parser')
-    communications = []
-    seen_hashes = set()
-
-    # Process emails
-    email_section = soup.find('h2', string=lambda t: t and 'Communications' in t)
-    if email_section:
-        email_table = email_section.find_next('table')
-        for row in email_table.find_all('tr')[1:]:  # Skip header
-            cols = row.find_all('td')
-            if len(cols) >= 5:
-                content = cols[4].get_text(strip=True)
-                content_hash = hashlib.md5(content.encode()).hexdigest()
-                
-                if content_hash not in seen_hashes:
-                    seen_hashes.add(content_hash)
-                    communications.append({
-                        'type': 'Email',
-                        'status': cols[0].get_text(strip=True),
-                        'subject': cols[1].get_text(strip=True),
-                        'from_address': cols[2].get_text(strip=True),
-                        'message_date': parse_date(cols[3].get_text(strip=True)),
-                        'content': content
-                    })
-
-    # Process comments
-    comments_section = soup.find('h2', string='Case Comments')
-    if comments_section:
-        comment_table = comments_section.find_next('table')
-        for row in comment_table.find_all('tr')[1:]:
-            cols = row.find_all('td')
-            if len(cols) >= 3:
-                content = cols[0].get_text(strip=True)
-                content_hash = hashlib.md5(content.encode()).hexdigest()
-                
-                if content_hash not in seen_hashes:
-                    seen_hashes.add(content_hash)
-                    communications.append({
-                        'type': 'Comment',
-                        'status': 'N/A',
-                        'subject': 'Case Comment',
-                        'from_address': cols[1].get_text(strip=True),
-                        'message_date': parse_date(cols[2].get_text(strip=True)),
-                        'content': content
-                    })
-
-    return communications
-
-# -------------------- Main Function --------------------
-def generate_case_report(case_no):
-    # Fetch and parse HTML content
-    url = generate_url(case_no)
-    html_content = fetch_content(url)
-    if not html_content:
-        return pd.DataFrame()
-
-    # Extract data
-    metadata = extract_case_metadata(html_content)
-    communications = process_communications(html_content)
-
-    # Create DataFrame
-    df = pd.DataFrame(communications)
-    
-    # Add metadata columns
-    for key, value in metadata.items():
-        df[key] = value
-
-    # Clean and format columns
-    df['message_date'] = df['message_date'].apply(
-        lambda x: x.strftime('%Y-%m-%d %H:%M:%S') if pd.notnull(x) else 'N/A')
-    
-    # Reorder columns
-    column_order = [
-        'case_number', 'title', 'description',
-        'type', 'status', 'subject', 'from_address', 'message_date', 'content',
-        'ccr_number', 'ccr_description'
-    ]
-    
-    return df[column_order].drop_duplicates().reset_index(drop=True)
-
-# -------------------- Execution --------------------
-if __name__ == "__main__":
-    case_number = '46816635'  # Replace with actual case number
-    report_df = generate_case_report(case_number)
-    
-    if not report_df.empty:
-        report_df.to_csv(f'case_{case_number}_report.csv', index=False)
-        print(f"Report generated successfully for case {case_number}")
-    else:
-        print("Failed to generate report")
+# Call function with paths to files
+index_local_to_csv(
+    id='46816635',
+    txt_path='/mnt/data/output.txt',
+    csv_path='/mnt/data/formatted_case_output.csv'
+)
