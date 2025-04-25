@@ -29,48 +29,124 @@ def extract_case_details(html_content):
     details = {}
 
     # Case Number and Title
-    case_number_title = soup.find('table', class_='collection-as-table1').find_all('font')
-    details['Case Number'] = case_number_title[0].next_sibling.strip() if case_number_title else None
-    details['Case Title'] = case_number_title[1].text.strip() if len(case_number_title) > 1 else None
+    try:
+        case_number_title_table = soup.find('table', class_='collection-as-table1')
+        if case_number_title_table:
+            case_number_title = case_number_title_table.find_all('font')
+            details['Case Number'] = case_number_title[0].next_sibling.strip() if case_number_title and len(case_number_title) > 0 else None
+            details['Case Title'] = case_number_title[1].text.strip() if case_number_title and len(case_number_title) > 1 else None
+        else:
+            details['Case Number'] = None
+            details['Case Title'] = None
+    except AttributeError as e:
+        print(f"Error extracting Case Number and Title: {e}")
+        details['Case Number'] = None
+        details['Case Title'] = None
 
     # Summary
-    summary_section = soup.find('tr', text=re.compile(r'Summary'))
-    if summary_section:
-        case_summary = summary_section.find_next('td', class_='collection-as-table')
-        details['Case Summary'] = case_summary.text.strip() if case_summary else None
+    try:
+        summary_section = soup.find('tr', text=re.compile(r'Summary'))
+        if summary_section:
+            case_summary = summary_section.find_next('td', class_='collection-as-table')
+            details['Case Summary'] = case_summary.text.strip() if case_summary else None
+        else:
+            details['Case Summary'] = None
+    except AttributeError as e:
+        print(f"Error extracting Case Summary: {e}")
+        details['Case Summary'] = None
 
     # Case Basics
-    case_basics_section = soup.find('tr', text=re.compile(r'Case Basics'))
-    if case_basics_section:
-        labels = case_basics_section.find_parent('table').find_all('td', align='right')
-        values = [label.find_next_sibling('td') for label in labels]
-        for label, value in zip(labels, values):
-            label_text = label.text.strip().replace(':', '')
-            details[label_text] = value.text.strip() if value else None
+    try:
+        case_basics_section = soup.find('tr', text=re.compile(r'Case Basics'))
+        if case_basics_section:
+            labels = case_basics_section.find_parent('table').find_all('td', align='right')
+            values = [label.find_next_sibling('td') for label in labels]
+            for label, value in zip(labels, values):
+                label_text = label.text.strip().replace(':', '')
+                details[label_text] = value.text.strip() if value else None
+        else:
+            # Initialize all Case Basics keys to None
+            case_basics_table = soup.find('tr', text=re.compile(r'Case Basics'))
+            if case_basics_table:
+                labels = case_basics_table.find_parent('table').find_all('td', align='right')
+                for label in labels:
+                    label_text = label.text.strip().replace(':', '')
+                    details[label_text] = None
+    except AttributeError as e:
+        print(f"Error extracting Case Basics: {e}")
+        # Initialize all Case Basics keys to None
+        case_basics_table = soup.find('tr', text=re.compile(r'Case Basics'))
+        if case_basics_table:
+            labels = case_basics_table.find_parent('table').find_all('td', align='right')
+            for label in labels:
+                label_text = label.text.strip().replace(':', '')
+                details[label_text] = None
 
     # Description
-    description_section = soup.find('tr', text=re.compile(r'Description'))
-    if description_section:
-        description_td = description_section.find_next('td', colspan="3")
-        details['Case Description'] = description_td.text.strip() if description_td else None
+    try:
+        description_section = soup.find('tr', text=re.compile(r'Description'))
+        if description_section:
+            description_td = description_section.find_next('td', colspan="3")
+            details['Case Description'] = description_td.text.strip() if description_td else None
+        else:
+            details['Case Description'] = None
+    except AttributeError as e:
+        print(f"Error extracting Case Description: {e}")
+        details['Case Description'] = None
 
     # Contact Information
-    contact_info_section = soup.find('tr', text=re.compile(r'Contact Information'))
-    if contact_info_section:
-        labels = contact_info_section.find_parent('table').find_all('td', align='right')
-        values = [label.find_next_sibling('td') for label in labels]
-        for label, value in zip(labels, values):
-            label_text = label.text.strip().replace(':', '')
-            details[label_text] = value.text.strip() if value else None
+    try:
+        contact_info_section = soup.find('tr', text=re.compile(r'Contact Information'))
+        if contact_info_section:
+            labels = contact_info_section.find_parent('table').find_all('td', align='right')
+            values = [label.find_next_sibling('td') for label in labels]
+            for label, value in zip(labels, values):
+                label_text = label.text.strip().replace(':', '')
+                details[label_text] = value.text.strip() if value else None
+        else:
+            # Initialize all Contact Information keys to None
+            contact_info_table = soup.find('tr', text=re.compile(r'Contact Information'))
+            if contact_info_table:
+                labels = contact_info_table.find_parent('table').find_all('td', align='right')
+                for label in labels:
+                    label_text = label.text.strip().replace(':', '')
+                    details[label_text] = None
+    except AttributeError as e:
+        print(f"Error extracting Contact Information: {e}")
+        # Initialize all Contact Information keys to None
+        contact_info_table = soup.find('tr', text=re.compile(r'Contact Information'))
+        if contact_info_table:
+            labels = contact_info_table.find_parent('table').find_all('td', align='right')
+            for label in labels:
+                label_text = label.text.strip().replace(':', '')
+                details[label_text] = None
 
     # Case Information
-    case_information_section = soup.find('tr', text=re.compile(r'Case Information'))
-    if case_information_section:
-        labels = case_information_section.find_parent('table').find_all('td', align='right')
-        values = [label.find_next_sibling('td') for label in labels]
-        for label, value in zip(labels, values):
-            label_text = label.text.strip().replace(':', '')
-            details[label_text] = value.text.strip() if value else None
+    try:
+        case_information_section = soup.find('tr', text=re.compile(r'Case Information'))
+        if case_information_section:
+            labels = case_information_section.find_parent('table').find_all('td', align='right')
+            values = [label.find_next_sibling('td') for label in labels]
+            for label, value in zip(labels, values):
+                label_text = label.text.strip().replace(':', '')
+                details[label_text] = value.text.strip() if value else None
+        else:
+            # Initialize all Case Information keys to None
+            case_info_table = soup.find('tr', text=re.compile(r'Case Information'))
+            if case_info_table:
+                labels = case_info_table.find_parent('table').find_all('td', align='right')
+                for label in labels:
+                    label_text = label.text.strip().replace(':', '')
+                    details[label_text] = None
+    except AttributeError as e:
+        print(f"Error extracting Case Information: {e}")
+        # Initialize all Case Information keys to None
+        case_info_table = soup.find('tr', text=re.compile(r'Case Information'))
+        if case_info_table:
+            labels = case_info_table.find_parent('table').find_all('td', align='right')
+            for label in labels:
+                label_text = label.text.strip().replace(':', '')
+                details[label_text] = None
 
     return details
 
