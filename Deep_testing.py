@@ -28,23 +28,34 @@ def extract_emails(soup):
         return []
     
     emails_table = emails_section.find_next('table')
+    if not emails_table:
+        return []
+    
     emails = []
-    
-    for email_row in emails_table.find_all('tr')[2::2]:  # Skip header and separator rows
+    # Skip header and separator rows using more robust selection
+    for email_row in emails_table.find_all('tr')[2:]:
+        # Skip rows that are just horizontal rules
+        if email_row.find('hr'):
+            continue
+            
         cols = email_row.find_all('td')
-        if len(cols) >= 5:
-            email_data = {
-                'Email Name': cols[0].get_text(strip=True),
-                'Status': cols[1].get_text(strip=True),
-                'Subject': cols[2].get_text(strip=True),
-                'From Address': cols[3].get_text(strip=True),
-                'Message Date': cols[4].get_text(strip=True),
-                'Email Body': cols[2].find('i').get_text(strip=True) if cols[2].find('i') else ''
-            }
-            emails.append(email_data)
-    
+        # Check we have exactly 5 columns before processing
+        if len(cols) == 5:
+            try:
+                email_data = {
+                    'Email Name': cols[0].get_text(strip=True),
+                    'Status': cols[1].get_text(strip=True),
+                    'Subject': cols[2].find('i').get_text(strip=True) if cols[2].find('i') else '',
+                    'From Address': cols[3].get_text(strip=True),
+                    'Message Date': cols[4].get_text(strip=True),
+                    'Email Body': cols[2].get_text(strip=True)  # Get full subject text
+                }
+                emails.append(email_data)
+            except (AttributeError, IndexError) as e:
+                print(f"Skipping malformed email row: {str(e)}")
+                continue
+                
     return emails
-
 def parse_html_to_df(html_content):
     """Main parsing function to structure all data"""
     soup = BeautifulSoup(html_content, 'html.parser')
