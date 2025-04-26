@@ -1,121 +1,142 @@
 import requests
+import warnings
 import pandas as pd
 from bs4 import BeautifulSoup
-from datetime import datetime
+import hashlib
 
-def extract_section_data(soup, section_title, headers):
-    """Extract data from a specific section table"""
-    section = soup.find('h4', string=section_title)
-    if not section:
-        return []
-    
-    table = section.find_next('table')
-    rows = table.find_all('tr')[1:]  # Skip header row
-    data = []
-    
-    for row in rows:
-        cells = row.find_all('td')
-        if len(cells) >= len(headers):
-            row_data = {headers[i]: cell.get_text(strip=True) for i, cell in enumerate(cells)}
-            data.append(row_data)
-    
-    return data
+warnings.filterwarnings("ignore")
 
-def extract_emails(soup):
-    """Extract structured email data with nested details"""
-    emails_section = soup.find('b', string='Emails')
-    if not emails_section:
-        return []
-    
-    emails_table = emails_section.find_next('table')
-    if not emails_table:
-        return []
-    
-    emails = []
-    # Skip header and separator rows using more robust selection
-    for email_row in emails_table.find_all('tr')[2:]:
-        # Skip rows that are just horizontal rules
-        if email_row.find('hr'):
-            continue
-            
-        cols = email_row.find_all('td')
-        # Check we have exactly 5 columns before processing
-        if len(cols) == 5:
-            try:
-                email_data = {
-                    'Email Name': cols[0].get_text(strip=True),
-                    'Status': cols[1].get_text(strip=True),
-                    'Subject': cols[2].find('i').get_text(strip=True) if cols[2].find('i') else '',
-                    'From Address': cols[3].get_text(strip=True),
-                    'Message Date': cols[4].get_text(strip=True),
-                    'Email Body': cols[2].get_text(strip=True)  # Get full subject text
-                }
-                emails.append(email_data)
-            except (AttributeError, IndexError) as e:
-                print(f"Skipping malformed email row: {str(e)}")
-                continue
-                
-    return emails
-def parse_html_to_df(html_content):
-    """Main parsing function to structure all data"""
-    soup = BeautifulSoup(html_content, 'html.parser')
-    
-    # Base case information
-    case_info = {
-        'Case Number': soup.find('span', string='Case Number').find_next('span').get_text(strip=True),
-        'Subject': soup.find('span', string='Subject').find_next('span').get_text(strip=True),
-        'Status': soup.find('span', string='Status').find_next('span').get_text(strip=True),
-        'Severity': soup.find('span', string='Severity').find_next('span').get_text(strip=True),
-        'Date Opened': soup.find('span', string='Date/Time Opened').find_next('span').get_text(strip=True),
-        'Date Closed': soup.find('span', string='Date/Time Closed').find_next('span').get_text(strip=True)
-    }
+def generate_url(case_no):
+    base_url1 = "http://cdsinfo.cadence.com/cgi-bin/cdsinfoprod?input="
+    base_url2 = "&type=_&codmode=p"
+    generated_url = base_url1 + str(case_no) + base_url2
+    return generated_url
 
-    # Extract structured sections
-    product_data = extract_section_data(soup, 'Product Information', 
-                                      ['Product Class', 'Product Feature Level 1', 'Product Feature', 'Product Feature Level 2'])
-    contact_data = extract_section_data(soup, 'Contact Information', 
-                                      ['Contact Name', 'Phone', 'Email', 'Account Name'])
-    emails_data = extract_emails(soup)
-    
-    # Create main DataFrame
-    df = pd.DataFrame([case_info])
-    
-    # Add nested data as JSON columns
-    df['Product Information'] = [product_data]
-    df['Contact Information'] = [contact_data]
-    df['Emails'] = [emails_data]
-    
-    return df
-
-def html_to_csv(case_number):
-    """End-to-end conversion function"""
-    url = f"http://cdsinfo.cadence.com/cgi-bin/cdsinfoprod?input={case_number}&type=_&codmode=p"
-    
+def fetch_url_content(url):
     try:
         response = requests.get(url)
         response.raise_for_status()
-        
-        df = parse_html_to_df(response.text)
-        
-        # Explode nested columns
-        exploded_dfs = []
-        for col in ['Product Information', 'Contact Information', 'Emails']:
-            if col in df.columns:
-                exploded = pd.json_normalize(df[col]).add_prefix(f'{col}_')
-                exploded_dfs.append(exploded)
-        
-        final_df = pd.concat([df.drop(columns=['Product Information', 'Contact Information', 'Emails'])] + exploded_dfs, axis=1)
-        
-        # Clean date formats
-        date_columns = ['Date Opened', 'Date Closed']
-        for col in date_columns:
-            final_df[col] = pd.to_datetime(final_df[col], errors='coerce')
-        
-        final_df.to_csv(f'case_{case_number}_structured.csv', index=False, encoding='utf-8-sig')
-        return f"CSV created successfully for case {case_number}"
-    
-    except Exception as e:
-        return f"Error processing case {case_number}: {str(e)}"
+        return response.text
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching URL {url}: {e}")
+        return None
 
-# Example usage
-print(html_to_csv('46816635'))
+def parse_case(html_content):
+    soup = BeautifulSoup(html_content, 'html.parser')
+
+    # Extract Case Information
+    case_number_tag = soup.find('font', text=lambda x: x and 'Case Number' in x)
+    case_number = case_number_tag.find_next('font').get_text(strip=True) if case_number_tag else ''
+
+    case_title_tag = case_number_tag.find_next('b') if case_number_tag else None
+    case_title = case_title_tag.get_text(strip=True) if case_title_tag else ''
+
+    env_tag = soup.find('font', text=lambda x: x and 'Environment' in x)
+    environment = env_tag.find_next('b').get_text(strip=True) if env_tag else ''
+
+    # Extract Summary
+    summary_section = soup.find('h4', text='Summary')
+    case_summary = ''
+    if summary_section:
+        summary_content = summary_section.find_next('td', {'colspan': '3'})
+        if summary_content:
+            case_summary = summary_content.get_text(separator=' ', strip=True)
+
+    # Extract Product Information
+    product_info = {}
+    product_section = soup.find('h4', text='Product Information')
+    if product_section:
+        table = product_section.find_next('table')
+        if table:
+            rows = table.find_all('tr')
+            for row in rows:
+                cols = row.find_all('td')
+                if len(cols) >= 2:
+                    key = cols[0].get_text(strip=True)
+                    val = cols[1].get_text(strip=True)
+                    product_info[key] = val
+
+    # Extract Contact Information
+    contact_info = {}
+    contact_section = soup.find('h4', text='Contact Information')
+    if contact_section:
+        table = contact_section.find_next('table')
+        if table:
+            rows = table.find_all('tr')
+            for row in rows:
+                cols = row.find_all('td')
+                if len(cols) >= 2:
+                    key = cols[0].get_text(strip=True)
+                    val = cols[1].get_text(strip=True)
+                    contact_info[key] = val
+
+    # Emails Section
+    emails_data = []
+    hashed_emails = set()
+
+    emails_section = soup.find('b', text='Emails')
+    if emails_section:
+        emails_table = emails_section.find_next('table')
+        if emails_table:
+            email_rows = emails_table.find_all('tr')
+            for row in email_rows:
+                cells = row.find_all('td')
+                if len(cells) == 5:
+                    email_name = cells[0].get_text(strip=True)
+                    email_status = cells[1].get_text(strip=True)
+                    email_subject = cells[2].get_text(strip=True)
+                    email_from = cells[3].get_text(strip=True)
+                    email_date = cells[4].get_text(strip=True)
+
+                    # Email body parsing
+                    body_table = row.find_next('table')
+                    email_body = ''
+                    if body_table:
+                        body_div = body_table.find('div')
+                        if body_div:
+                            email_body = body_div.get_text(separator=' ', strip=True)
+
+                    email_hash = hashlib.md5(email_body.encode()).hexdigest()
+
+                    if email_hash not in hashed_emails:
+                        hashed_emails.add(email_hash)
+                        emails_data.append({
+                            'Case Number': case_number,
+                            'Case Title': case_title,
+                            'Environment': environment,
+                            'Case Summary': case_summary,
+                            'Email Name': email_name,
+                            'Email Status': email_status,
+                            'Email Subject': email_subject,
+                            'Email From': email_from,
+                            'Email Date': email_date,
+                            'Email Body': email_body,
+                            **product_info,
+                            **contact_info
+                        })
+    return emails_data
+
+def main():
+    # List your case numbers here
+    case_numbers = ['46816635']
+
+    all_cases_data = []
+
+    for case_no in case_numbers:
+        print(f"Processing Case: {case_no}")
+        url = generate_url(case_no)
+        html_content = fetch_url_content(url)
+        if html_content:
+            case_data = parse_case(html_content)
+            all_cases_data.extend(case_data)
+
+    # Save to CSV
+    if all_cases_data:
+        df = pd.DataFrame(all_cases_data)
+        df.to_csv('final_cases_output.csv', index=False, encoding='utf-8-sig')
+        print("Scraping Completed! Data saved to 'final_cases_output.csv'")
+    else:
+        print("No data found to save.")
+
+if __name__ == "__main__":
+    main()
