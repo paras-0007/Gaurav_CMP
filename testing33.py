@@ -1,157 +1,153 @@
 import requests
 import pandas as pd
 from bs4 import BeautifulSoup
-from datetime import datetime
 import hashlib
+import warnings
+
+warnings.filterwarnings("ignore")
 
 def generate_url(case_no):
-    return f"http://cdsinfo.cadence.com/cgi-bin/cdsinfoprod?input={case_no}&type=_&codmode=p"
+    base_url = "http://cdsinfo.cadence.com/cgi-bin/cdsinfoprod?input="
+    return f"{base_url}{case_no}&type=_&codmode=p"
 
 def fetch_html(url):
     try:
-        response = requests.get(url, timeout=10)
+        response = requests.get(url)
         response.raise_for_status()
         return response.text
     except Exception as e:
-        print(f"Error fetching URL: {e}")
+        print(f"Failed to fetch URL {url}: {e}")
         return None
 
-def extract_case_info(html):
-    soup = BeautifulSoup(html, 'html.parser')
-    
-    case_info = {
-        'Case Number': '',
-        'Case Title': '',
-        'Case Description': '',
-        'Product Class': '',
-        'Status': '',
-        'Severity': '',
-        'Date Opened': '',
-        'Date Closed': ''
-    }
+def hash_content(fields):
+    combined = ' '.join(fields)
+    return hashlib.md5(combined.encode('utf-8')).hexdigest()
 
-    try:
-        case_info['Case Number'] = soup.find('span', string='Case Number').find_next('span').text.strip()
-    except AttributeError:
-        pass
-
-    try:
-        case_info['Case Title'] = soup.find('b').text.strip()
-    except AttributeError:
-        pass
-
-    try:
-        case_info['Case Description'] = soup.find('span', string='Description').find_next('span').text.strip()
-    except AttributeError:
-        pass
-
-    try:
-        case_info['Product Class'] = soup.find('span', string='Product Class').find_next('span').text.strip()
-    except AttributeError:
-        pass
-
-    try:
-        case_info['Status'] = soup.find('span', string='Status').find_next('span').text.strip()
-    except AttributeError:
-        pass
-
-    try:
-        case_info['Severity'] = soup.find('span', string='Severity').find_next('span').text.strip()
-    except AttributeError:
-        pass
-
-    try:
-        case_info['Date Opened'] = soup.find('span', string='Date/Time Opened').find_next('span').text.strip()
-    except AttributeError:
-        pass
-
-    try:
-        case_info['Date Closed'] = soup.find('span', string='Date/Time Closed').find_next('span').text.strip()
-    except AttributeError:
-        pass
-
-    return case_info
-
-def parse_email_table(table):
-    emails = []
+def parse_case(html_content):
+    soup = BeautifulSoup(html_content, 'html.parser')
+    parsed_data = []
     seen_hashes = set()
-    
-    rows = table.find_all('tr')[2:]  # Skip header rows
-    for row in rows:
-        cols = row.find_all('td')
-        if len(cols) >= 5:
-            email = {
-                'Email Name': cols[0].text.strip(),
-                'Status': cols[1].text.strip(),
-                'Subject': cols[2].text.strip(),
-                'FromAddress': cols[3].text.strip(),
-                'MessageDate': cols[4].text.strip(),
-                'Content': ''
-            }
 
-            # Extract email content
-            content_section = row.find_next('tr').find('div')
-            if content_section:
-                email['Content'] = ' '.join(content_section.stripped_strings)
+    # Extract Case Info
+    case_number_tag = soup.find('font', string=lambda x: x and 'Case Number' in x)
+    case_number = case_number_tag.find_next('font').text.strip() if case_number_tag else ''
 
-            # Create unique hash to detect duplicates
-            email_hash = hashlib.md5(
-                (email['Subject'] + email['MessageDate'] + email['Content']).encode()
-            ).hexdigest()
+    case_title_tag = case_number_tag.find_next('b') if case_number_tag else None
+    case_title = case_title_tag.text.strip() if case_title_tag else ''
 
-            if email_hash not in seen_hashes:
-                seen_hashes.add(email_hash)
-                emails.append(email)
-    
-    return emails
+    # Summary
+    summary_section = soup.find('h4', string='Summary')
+    case_summary = ''
+    if summary_section:
+        summary_td = summary_section.find_next('td', {'colspan': '3'})
+        if summary_td:
+            case_summary = summary_td.get_text(separator=' ', strip=True)
 
-def extract_emails(html):
-    soup = BeautifulSoup(html, 'html.parser')
+    # Emails Section
     emails_section = soup.find('b', string='Emails')
-    
-    if not emails_section:
-        return []
-    
-    email_tables = emails_section.find_parent('tr').find_next_siblings('tr')[1].find_all('table')
-    all_emails = []
-    
-    for table in email_tables:
-        all_emails.extend(parse_email_table(table))
-    
-    return all_emails
+    if emails_section:
+        email_table = emails_section.find_next('table')
+        if email_table:
+            email_rows = email_table.find_all('tr')
+            for row in email_rows:
+                cols = row.find_all('td')
+                if len(cols) == 5:
+                    email_name = cols[0].text.strip()
+                    email_status = cols[1].text.strip()
+                    email_subject = cols[2].text.strip()
+                    email_from = cols[3].text.strip()
+                    email_date = cols[4].text.strip()
 
-def process_case(case_no):
-    url = generate_url(case_no)
-    html = fetch_html(url)
-    
-    if not html:
-        return pd.DataFrame()
+                    # Fetch the corresponding email body
+                    next_table = row.find_next('table')
+                    email_body = ''
+                    if next_table:
+                        body_div = next_table.find('div')
+                        if body_div:
+                            email_body = body_div.get_text(separator=' ', strip=True)
 
-    case_info = extract_case_info(html)
-    emails = extract_emails(html)
+                    body_hash = hash_content([email_name, email_status, email_subject, email_from, email_date, email_body])
+                    if body_hash not in seen_hashes:
+                        seen_hashes.add(body_hash)
 
-    # Create DataFrame
-    df = pd.DataFrame(emails)
-    for key, value in case_info.items():
-        df[key] = value
-    
-    # Reorder columns
-    columns = ['Case Number', 'Case Title', 'Case Description', 'Product Class',
-               'Status', 'Severity', 'Date Opened', 'Date Closed',
-               'Email Name', 'Status', 'Subject', 'FromAddress', 
-               'MessageDate', 'Content']
-    
-    return df[columns]
+                        parsed_data.append({
+                            'Case Number': case_number,
+                            'Case Title': case_title,
+                            'Case Summary': case_summary,
+                            'Email Name': email_name,
+                            'Email Status': email_status,
+                            'Email Subject': email_subject,
+                            'Email From': email_from,
+                            'Email Date': email_date,
+                            'Email Body': email_body,
+                            'Case Feed Author': '',
+                            'Case Feed Comment': '',
+                            'Case Feed Timestamp': ''
+                        })
 
-def save_to_csv(df, filename):
-    df.to_csv(filename, index=False, encoding='utf-8-sig')
+    # Case Feed Section
+    case_feed_section = soup.find('h4', string='Case Feed')
+    if case_feed_section:
+        feed_table = case_feed_section.find_next('table')
+        if feed_table:
+            rows = feed_table.find_all('tr')[1:]  # skip header row
+            for row in rows:
+                cols = row.find_all('td')
+                if len(cols) >= 3:
+                    feed_author = cols[0].text.strip()
+                    feed_comment = cols[1].text.strip()
+                    feed_time = cols[2].text.strip()
+
+                    body_hash = hash_content([feed_author, feed_comment, feed_time])
+                    if body_hash not in seen_hashes:
+                        seen_hashes.add(body_hash)
+
+                        parsed_data.append({
+                            'Case Number': case_number,
+                            'Case Title': case_title,
+                            'Case Summary': case_summary,
+                            'Email Name': '',
+                            'Email Status': '',
+                            'Email Subject': '',
+                            'Email From': '',
+                            'Email Date': '',
+                            'Email Body': '',
+                            'Case Feed Author': feed_author,
+                            'Case Feed Comment': feed_comment,
+                            'Case Feed Timestamp': feed_time
+                        })
+
+    return parsed_data
+
+def clean_case_columns(df):
+    # Blank out duplicate case number, title, summary rows after first
+    for case_number in df['Case Number'].unique():
+        indices = df.index[df['Case Number'] == case_number].tolist()
+        for idx in indices[1:]:
+            df.at[idx, 'Case Number'] = ''
+            df.at[idx, 'Case Title'] = ''
+            df.at[idx, 'Case Summary'] = ''
+    return df
+
+def main():
+    case_numbers = ['46816635']  # Add more case numbers if needed
+    all_data = []
+
+    for case_no in case_numbers:
+        print(f"Processing Case: {case_no}")
+        url = generate_url(case_no)
+        html_content = fetch_html(url)
+        if html_content:
+            case_data = parse_case(html_content)
+            all_data.extend(case_data)
+
+    if all_data:
+        df = pd.DataFrame(all_data)
+        df = clean_case_columns(df)
+        df.to_csv('final_cases_output.csv', index=False, encoding='utf-8-sig')
+        print("✅ Scraping completed. File saved as 'final_cases_output.csv'.")
+    else:
+        print("⚠️ No data extracted.")
 
 if __name__ == "__main__":
-    case_number = '46816635'
-    result_df = process_case(case_number)
-    
-    if not result_df.empty:
-        save_to_csv(result_df, 'case_report.csv')
-        print("Report generated successfully!")
-    else:
-        print("Failed to generate report")
+    main()
